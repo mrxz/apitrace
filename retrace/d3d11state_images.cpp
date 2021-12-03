@@ -428,10 +428,11 @@ dumpShaderResourceViewImage(StateWriter &writer,
 }
 
 
-static image::Image *
+static image::Image **
 getRenderTargetViewImage(ID3D11DeviceContext *pDevice,
                          ID3D11RenderTargetView *pRenderTargetView,
-                         DXGI_FORMAT *dxgiFormat)
+                         DXGI_FORMAT *dxgiFormat,
+                         UINT *numImages)
 {
     if (!pRenderTargetView) {
         return NULL;
@@ -450,6 +451,8 @@ getRenderTargetViewImage(ID3D11DeviceContext *pDevice,
 
     // TODO: Take the slice in consideration
     UINT MipSlice;
+    UINT FirstArraySlice = 0;
+    UINT ArraySize = 1;
     switch (Desc.ViewDimension) {
     case D3D11_RTV_DIMENSION_BUFFER:
         MipSlice = 0;
@@ -465,12 +468,16 @@ getRenderTargetViewImage(ID3D11DeviceContext *pDevice,
         break;
     case D3D11_RTV_DIMENSION_TEXTURE2DARRAY:
         MipSlice = Desc.Texture2DArray.MipSlice;
+        FirstArraySlice = Desc.Texture2DArray.FirstArraySlice;
+        ArraySize = Desc.Texture2DArray.ArraySize;
         break;
     case D3D11_RTV_DIMENSION_TEXTURE2DMS:
         MipSlice = 0;
         break;
     case D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY:
         MipSlice = 0;
+        FirstArraySlice = Desc.Texture2DMSArray.FirstArraySlice;
+        ArraySize = Desc.Texture2DMSArray.ArraySize;
         break;
     case D3D11_RTV_DIMENSION_TEXTURE3D:
         MipSlice = Desc.Texture3D.MipSlice;
@@ -481,7 +488,12 @@ getRenderTargetViewImage(ID3D11DeviceContext *pDevice,
         return NULL;
     }
 
-    return getSubResourceImage(pDevice, pResource, Desc.Format, 0, MipSlice);
+    (*numImages) = ArraySize;
+    image::Image **result = (image::Image**) malloc(sizeof(image::Image*) * 3);
+    for(UINT ArraySlice = FirstArraySlice; ArraySlice < FirstArraySlice + ArraySize; ++ArraySlice) {
+        result[ArraySlice - FirstArraySlice] = getSubResourceImage(pDevice, pResource, Desc.Format, ArraySlice, MipSlice);
+    }
+    return result;
 }
 
 
@@ -655,7 +667,8 @@ getRenderTargetImage(ID3D11DeviceContext *pDevice,
         pDevice->OMGetRenderTargets(1, &pRenderTargetView, nullptr);
 
         if (pRenderTargetView) {
-            image = getRenderTargetViewImage(pDevice, pRenderTargetView, dxgiFormat);
+            UINT numImages = 0;
+            image = getRenderTargetViewImage(pDevice, pRenderTargetView, dxgiFormat, &numImages)[0]; // Memory leak
         }
     }
 
@@ -681,20 +694,24 @@ dumpFramebuffer(StateWriter &writer, ID3D11DeviceContext *pDevice)
                 continue;
             }
 
-            image::Image *image;
+            image::Image **images;
             DXGI_FORMAT dxgiFormat;
-            image = getRenderTargetViewImage(pDevice, pRenderTargetViews[i],
-                                             &dxgiFormat);
-            if (image) {
-                char label[64];
-                _snprintf(label, sizeof label, "RENDER_TARGET_%u", i);
-                StateWriter::ImageDesc imgDesc;
-                imgDesc.depth = 1;
-                imgDesc.format = getDXGIFormatName(dxgiFormat);
-                writer.beginMember(label);
-                writer.writeImage(image, imgDesc);
-                writer.endMember(); // RENDER_TARGET_*
-                delete image;
+            UINT numImages;
+            images = getRenderTargetViewImage(pDevice, pRenderTargetViews[i],
+                                             &dxgiFormat, &numImages);
+            if (images) {
+                for(size_t slice = 0; slice < numImages; slice++) {
+                    char label[64];
+                    _snprintf(label, sizeof label, "RENDER_TARGET_%u_%u", i, slice);
+                    StateWriter::ImageDesc imgDesc;
+                    imgDesc.depth = 1;
+                    imgDesc.format = getDXGIFormatName(dxgiFormat);
+                    writer.beginMember(label);
+                    writer.writeImage(images[slice], imgDesc);
+                    writer.endMember(); // RENDER_TARGET_*
+                    delete images[slice];
+                }
+                free(images);
             }
 
             pRenderTargetViews[i]->Release();
